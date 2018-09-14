@@ -29,6 +29,7 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -64,17 +65,21 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
 
     /** Default time in seconds between 2 cleaning tasks (used to remove expired registration). */
     public static final long DEFAULT_CLEAN_PERIOD = 60;
+    public static final int DEFAULT_CLEAN_LIMIT = 500;
     /** Defaut Extra time for registration lifetime in seconds */
     public static final long DEFAULT_GRACE_PERIOD = 0;
 
     private static final Logger LOG = LoggerFactory.getLogger(RedisRegistrationStore.class);
 
     // Redis key prefixes
-    private static final String REG_EP = "REG:EP:";
-    private static final String REG_EP_REGID_IDX = "EP:REGID:"; // secondary index key (registration)
+    private static final String REG_EP = "REG:EP:"; // (Endpoint => Registration)
+    private static final String REG_EP_REGID_IDX = "EP:REGID:"; // secondary index key (Registration ID => Endpoint)
+    private static final String REG_EP_ADDR_IDX = "EP:ADDR:"; // secondary index key (Socket Address => Endpoint)
     private static final String LOCK_EP = "LOCK:EP:";
     private static final byte[] OBS_TKN = "OBS:TKN:".getBytes(UTF_8);
     private static final String OBS_TKNS_REGID_IDX = "TKNS:REGID:"; // secondary index (token list by registration)
+    private static final byte[] EXP_EP = "EXP:EP".getBytes(UTF_8); // a sorted set used for registration expiration
+                                                                   // (expiration date, Endpoint)
 
     private final Pool<Jedis> pool;
 
@@ -83,23 +88,25 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
 
     private final ScheduledExecutorService schedExecutor;
     private final long cleanPeriod; // in seconds
+    private final int cleanLimit; // maximum number to clean in a clean period
     private final long gracePeriod; // in seconds
 
     public RedisRegistrationStore(Pool<Jedis> p) {
-        this(p, DEFAULT_CLEAN_PERIOD, DEFAULT_GRACE_PERIOD); // default clean period 60s
+        this(p, DEFAULT_CLEAN_PERIOD, DEFAULT_GRACE_PERIOD, DEFAULT_CLEAN_LIMIT); // default clean period 60s
     }
 
-    public RedisRegistrationStore(Pool<Jedis> p, long cleanPeriodInSec, long lifetimeGracePeriodInSec) {
+    public RedisRegistrationStore(Pool<Jedis> p, long cleanPeriodInSec, long lifetimeGracePeriodInSec, int cleanLimit) {
         this(p, Executors.newScheduledThreadPool(1,
                 new NamedThreadFactory(String.format("RedisRegistrationStore Cleaner (%ds)", cleanPeriodInSec))),
-                cleanPeriodInSec, lifetimeGracePeriodInSec);
+                cleanPeriodInSec, lifetimeGracePeriodInSec, cleanLimit);
     }
 
     public RedisRegistrationStore(Pool<Jedis> p, ScheduledExecutorService schedExecutor, long cleanPeriodInSec,
-            long lifetimeGracePeriodInSec) {
+            long lifetimeGracePeriodInSec, int cleanLimit) {
         this.pool = p;
         this.schedExecutor = schedExecutor;
         this.cleanPeriod = cleanPeriodInSec;
+        this.cleanLimit = cleanLimit;
         this.gracePeriod = lifetimeGracePeriodInSec;
     }
 
@@ -139,15 +146,23 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
                 byte[] k = toEndpointKey(registration.getEndpoint());
                 byte[] old = j.getSet(k, serializeReg(registration));
 
-                // add registration: secondary index
-                byte[] idx = toRegIdKey(registration.getId());
-                j.set(idx, registration.getEndpoint().getBytes(UTF_8));
+                // add registration: secondary indexes
+                byte[] regid_idx = toRegIdKey(registration.getId());
+                j.set(regid_idx, registration.getEndpoint().getBytes(UTF_8));
+                byte[] addr_idx = toRegAddrKey(registration.getSocketAddress());
+                j.set(addr_idx, registration.getEndpoint().getBytes(UTF_8));
+
+                // Add or update expiration
+                addOrUpdateExpiration(j, registration);
 
                 if (old != null) {
                     Registration oldRegistration = deserializeReg(old);
                     // remove old secondary index
-                    if (registration.getId() != oldRegistration.getId())
+                    if (!registration.getId().equals(oldRegistration.getId()))
                         j.del(toRegIdKey(oldRegistration.getId()));
+                    if (!oldRegistration.getSocketAddress().equals(registration.getSocketAddress())) {
+                        removeAddrIndex(j, oldRegistration);
+                    }
                     // remove old observation
                     Collection<Observation> obsRemoved = unsafeRemoveAllObservations(j, oldRegistration.getId());
 
@@ -165,7 +180,7 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
     public UpdatedRegistration updateRegistration(RegistrationUpdate update) {
         try (Jedis j = pool.getResource()) {
 
-            // fetch the client ep by registration ID index
+            // Fetch the registration ep by registration ID index
             byte[] ep = j.get(toRegIdKey(update.getRegistrationId()));
             if (ep == null) {
                 return null;
@@ -176,7 +191,7 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
             try {
                 lockValue = RedisLock.acquire(j, lockKey);
 
-                // fetch the client
+                // Fetch the registration
                 byte[] data = j.get(toEndpointKey(ep));
                 if (data == null) {
                     return null;
@@ -186,8 +201,20 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
 
                 Registration updatedRegistration = update.update(r);
 
-                // store the new client
+                // Store the new registration
                 j.set(toEndpointKey(updatedRegistration.getEndpoint()), serializeReg(updatedRegistration));
+
+                // Add or update expiration
+                addOrUpdateExpiration(j, updatedRegistration);
+
+                // Update secondary index :
+                // If registration is already associated to this address we don't care as we only want to keep the most
+                // recent binding.
+                byte[] addr_idx = toRegAddrKey(updatedRegistration.getSocketAddress());
+                j.set(addr_idx, updatedRegistration.getEndpoint().getBytes(UTF_8));
+                if (!r.getSocketAddress().equals(updatedRegistration.getSocketAddress())) {
+                    removeAddrIndex(j, r);
+                }
 
                 return new UpdatedRegistration(r, updatedRegistration);
 
@@ -218,14 +245,18 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
 
     @Override
     public Registration getRegistrationByAdress(InetSocketAddress address) {
-        // TODO we should create an index instead of iterate all over the collection
-        for (Iterator<Registration> iterator = getAllRegistrations(); iterator.hasNext();) {
-            Registration r = iterator.next();
-            if (address.getPort() == r.getPort() && address.getAddress().equals(r.getAddress())) {
-                return r;
+        Validate.notNull(address);
+        try (Jedis j = pool.getResource()) {
+            byte[] ep = j.get(toRegAddrKey(address));
+            if (ep == null) {
+                return null;
             }
+            byte[] data = j.get(toEndpointKey(ep));
+            if (data == null) {
+                return null;
+            }
+            return deserializeReg(data);
         }
-        return null;
     }
 
     @Override
@@ -327,6 +358,8 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
                 if (nbRemoved > 0) {
                     j.del(toEndpointKey(r.getEndpoint()));
                     Collection<Observation> obsRemoved = unsafeRemoveAllObservations(j, r.getId());
+                    removeAddrIndex(j, r);
+                    removeExpiration(j, r);
                     return new Deregistration(r, obsRemoved);
                 }
             }
@@ -336,8 +369,28 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
         }
     }
 
+    private void removeAddrIndex(Jedis j, Registration registration) {
+        byte[] regAddrKey = toRegAddrKey(registration.getSocketAddress());
+        byte[] epFromAddr = j.get(regAddrKey);
+        if (Arrays.equals(epFromAddr, registration.getEndpoint().getBytes(UTF_8))) {
+            j.del(regAddrKey);
+        }
+    }
+
+    private void addOrUpdateExpiration(Jedis j, Registration registration) {
+        j.zadd(EXP_EP, registration.getExpirationTimeStamp(gracePeriod), registration.getEndpoint().getBytes(UTF_8));
+    }
+
+    private void removeExpiration(Jedis j, Registration registration) {
+        j.zrem(EXP_EP, registration.getEndpoint().getBytes(UTF_8));
+    }
+
     private byte[] toRegIdKey(String registrationId) {
         return toKey(REG_EP_REGID_IDX, registrationId);
+    }
+
+    private byte[] toRegAddrKey(InetSocketAddress addr) {
+        return toKey(REG_EP_ADDR_IDX, addr.getAddress().toString() + ":" + addr.getPort());
     }
 
     private byte[] toEndpointKey(String endpoint) {
@@ -473,19 +526,22 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
     /* *************** Californium ObservationStore API **************** */
 
     @Override
-    public org.eclipse.californium.core.observe.Observation putIfAbsent(Token token, org.eclipse.californium.core.observe.Observation obs) {
+    public org.eclipse.californium.core.observe.Observation putIfAbsent(Token token,
+            org.eclipse.californium.core.observe.Observation obs) {
         return add(token, obs, true);
     }
 
     @Override
-    public org.eclipse.californium.core.observe.Observation put(Token token, org.eclipse.californium.core.observe.Observation obs) {
+    public org.eclipse.californium.core.observe.Observation put(Token token,
+            org.eclipse.californium.core.observe.Observation obs) {
         return add(token, obs, false);
     }
 
-    private org.eclipse.californium.core.observe.Observation add(Token token, org.eclipse.californium.core.observe.Observation obs, boolean ifAbsent) {
+    private org.eclipse.californium.core.observe.Observation add(Token token,
+            org.eclipse.californium.core.observe.Observation obs, boolean ifAbsent) {
         String endpoint = ObserveUtil.validateCoapObservation(obs);
         org.eclipse.californium.core.observe.Observation previousObservation = null;
-        
+
         try (Jedis j = pool.getResource()) {
             byte[] lockValue = null;
             byte[] lockKey = toKey(LOCK_EP, endpoint);
@@ -658,21 +714,17 @@ public class RedisRegistrationStore implements CaliforniumRegistrationStore, Sta
         public void run() {
 
             try (Jedis j = pool.getResource()) {
-                ScanParams params = new ScanParams().match(REG_EP + "*").count(100);
-                String cursor = "0";
-                do {
-                    ScanResult<byte[]> res = j.scan(cursor.getBytes(), params);
-                    for (byte[] key : res.getResult()) {
-                        Registration r = deserializeReg(j.get(key));
-                        if (!r.isAlive(gracePeriod)) {
-                            Deregistration dereg = removeRegistration(j, r.getId(), true);
-                            if (dereg != null)
-                                expirationListener.registrationExpired(dereg.getRegistration(),
-                                        dereg.getObservations());
-                        }
+                Set<byte[]> endpointsExpired = j.zrangeByScore(EXP_EP, Double.NEGATIVE_INFINITY,
+                        System.currentTimeMillis(), 0, cleanLimit);
+
+                for (byte[] endpoint : endpointsExpired) {
+                    Registration r = deserializeReg(j.get(toEndpointKey(endpoint)));
+                    if (!r.isAlive(gracePeriod)) {
+                        Deregistration dereg = removeRegistration(j, r.getId(), true);
+                        if (dereg != null)
+                            expirationListener.registrationExpired(dereg.getRegistration(), dereg.getObservations());
                     }
-                    cursor = res.getStringCursor();
-                } while (!"0".equals(cursor));
+                }
             } catch (Exception e) {
                 LOG.warn("Unexpected Exception while registration cleaning", e);
             }

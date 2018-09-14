@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2017 Sierra Wireless and others.
+ * Copyright (c) 2013-2018 Sierra Wireless and others.
  * 
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
@@ -13,23 +13,19 @@
  * Contributors:
  *     Sierra Wireless - initial API and implementation
  *******************************************************************************/
-package org.eclipse.leshan.server.californium.impl;
+package org.eclipse.leshan.core.californium;
 
-import org.eclipse.californium.core.network.Exchange;
-import org.eclipse.californium.core.network.ExchangeObserver;
+import org.eclipse.californium.core.coap.Response;
 
 /**
- * An abstract adapter class for reacting to exchange events. The methods in this class are empty. This class exists as
- * convenience for creating exchange observer objects.
+ * On success callback for request.
  */
-// TODO should be part of californium ?
-public class ExchangeObserverAdapter implements ExchangeObserver {
+public interface CoapResponseCallback {
+    // We should keep this as a 1 method interface to be java 8 lambda compatible.
 
-    @Override
-    public void completed(Exchange exchange) {
-    }
+    /**
+     * Called when the request succeed.
+     */
+    void onResponse(Response response);
 
-    @Override
-    public void contextEstablished(Exchange exchange) {
-    }
 }

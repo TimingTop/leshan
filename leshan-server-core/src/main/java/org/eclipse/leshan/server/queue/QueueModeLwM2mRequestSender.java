@@ -27,8 +27,8 @@ import org.eclipse.leshan.util.Validate;
 
 public class QueueModeLwM2mRequestSender implements LwM2mRequestSender {
 
-    private PresenceServiceImpl presenceService;
-    private LwM2mRequestSender delegatedSender;
+    protected PresenceServiceImpl presenceService;
+    protected LwM2mRequestSender delegatedSender;
 
     /**
      * @param presenceService the presence service object for setting the client into {@link Presence#SLEEPING} when

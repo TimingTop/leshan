@@ -17,8 +17,12 @@
  *******************************************************************************/
 package org.eclipse.leshan.client.object;
 
+import java.util.Arrays;
+import java.util.List;
+
 import org.eclipse.leshan.client.resource.BaseInstanceEnabler;
 import org.eclipse.leshan.client.resource.LwM2mInstanceEnabler;
+import org.eclipse.leshan.core.model.ObjectModel;
 import org.eclipse.leshan.core.model.ResourceModel.Type;
 import org.eclipse.leshan.core.node.LwM2mResource;
 import org.eclipse.leshan.core.request.BindingMode;
@@ -31,12 +35,18 @@ import org.eclipse.leshan.core.response.WriteResponse;
  */
 public class Server extends BaseInstanceEnabler {
 
+    private final static List<Integer> supportedResources = Arrays.asList(0, 1, 2, 3, 6, 7, 8);
+
     private int shortServerId;
     private long lifetime;
     private Long defaultMinPeriod;
     private Long defaultMaxPeriod;
     private BindingMode binding;
     private boolean notifyWhenDisable;
+
+    public Server() {
+        // should only be used at bootstrap time
+    }
 
     public Server(int shortServerId, long lifetime, BindingMode binding, boolean notifyWhenDisable) {
         this.shortServerId = shortServerId;
@@ -157,4 +167,8 @@ public class Server extends BaseInstanceEnabler {
         }
     }
 
+    @Override
+    public List<Integer> getAvailableResourceIds(ObjectModel model) {
+        return supportedResources;
+    }
 }

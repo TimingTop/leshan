@@ -275,6 +275,24 @@ public class LwM2mNodeDecoderTest {
         assertAclInstances(oObject);
     }
 
+    @Test(expected = CodecException.class)
+    public void tlv_invalid_object_2_instances_with_the_same_id() {
+        Tlv objInstance1 = new Tlv(TlvType.OBJECT_INSTANCE, new Tlv[0], null, 1);
+        Tlv objInstance2 = new Tlv(TlvType.OBJECT_INSTANCE, new Tlv[0], null, 1);
+        byte[] content = TlvEncoder.encode(new Tlv[] { objInstance1, objInstance2 }).array();
+
+        decoder.decode(content, ContentFormat.TLV, new LwM2mPath(2), model);
+    }
+
+    @Test(expected = CodecException.class)
+    public void tlv_invalid_object__instance_2_resources_with_the_same_id() {
+        Tlv resource1 = new Tlv(TlvType.RESOURCE_VALUE, null, new byte[0], 1);
+        Tlv resource2 = new Tlv(TlvType.RESOURCE_VALUE, null, new byte[0], 1);
+        byte[] content = TlvEncoder.encode(new Tlv[] { resource1, resource2 }).array();
+
+        decoder.decode(content, ContentFormat.TLV, new LwM2mPath(3, 0), model);
+    }
+
     @Test
     public void tlv_single_instance_with_obj_link() throws Exception {
         LwM2mObjectInstance oInstance = ((LwM2mObjectInstance) decoder.decode(ENCODED_OBJ65, ContentFormat.TLV,
@@ -339,6 +357,29 @@ public class LwM2mNodeDecoderTest {
 
         assertEquals(1, obj.getInstances().size());
         assertEquals(2, obj.getInstance(0).getResources().size());
+    }
+
+    @Test
+    public void tlv_resource_with_undesired_object_instance() throws CodecException {
+
+        Tlv resInstance1 = new Tlv(TlvType.RESOURCE_VALUE, null, "client".getBytes(), 1);
+        Tlv objInstance = new Tlv(TlvType.OBJECT_INSTANCE, new Tlv[] { resInstance1 }, null, 0);
+        byte[] content = TlvEncoder.encode(new Tlv[] { objInstance }).array();
+
+        LwM2mSingleResource res = (LwM2mSingleResource) decoder.decode(content, ContentFormat.TLV,
+                new LwM2mPath(3, 0, 1), model);
+
+        assertEquals("client", res.getValue());
+    }
+
+    @Test(expected = CodecException.class)
+    public void tlv_resource_with_undesired_invalid_object_instance() throws CodecException {
+
+        Tlv resInstance1 = new Tlv(TlvType.RESOURCE_VALUE, null, "client".getBytes(), 1);
+        Tlv objInstance = new Tlv(TlvType.OBJECT_INSTANCE, new Tlv[] { resInstance1 }, null, 1);
+        byte[] content = TlvEncoder.encode(new Tlv[] { objInstance }).array();
+
+        decoder.decode(content, ContentFormat.TLV, new LwM2mPath(3, 0, 1), model);
     }
 
     @Test
@@ -646,5 +687,27 @@ public class LwM2mNodeDecoderTest {
         assertTrue(resource instanceof LwM2mMultipleResource);
         assertEquals(6, resource.getId());
         assertTrue(resource.getValues().isEmpty());
+    }
+
+    @Test(expected = CodecException.class)
+    public void json_invalid_instance_2_resources_with_the_same_id() {
+        StringBuilder b = new StringBuilder();
+        b.append("{\"e\":[");
+        b.append("{\"n\":\"1\",\"sv\":\"client1\"},");
+        b.append("{\"n\":\"1\",\"sv\":\"client2\"}");
+        b.append("]}");
+
+        decoder.decode(b.toString().getBytes(), ContentFormat.JSON, new LwM2mPath(3, 0), model);
+    }
+
+    @Test(expected = CodecException.class)
+    public void json_invalid_multi_resource_2_instances_with_the_same_id() {
+        StringBuilder b = new StringBuilder();
+        b.append("{\"e\":[");
+        b.append("{\"n\":\"1\",\"v\":2},");
+        b.append("{\"n\":\"1\",\"v\":0}");
+        b.append("]}");
+
+        decoder.decode(b.toString().getBytes(), ContentFormat.JSON, new LwM2mPath(3, 0, 11), model);
     }
 }

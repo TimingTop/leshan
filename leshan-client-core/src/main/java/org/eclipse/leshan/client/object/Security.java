@@ -15,17 +15,15 @@
  *******************************************************************************/
 package org.eclipse.leshan.client.object;
 
-import static org.eclipse.leshan.LwM2mId.SEC_BOOTSTRAP;
-import static org.eclipse.leshan.LwM2mId.SEC_PUBKEY_IDENTITY;
-import static org.eclipse.leshan.LwM2mId.SEC_SECRET_KEY;
-import static org.eclipse.leshan.LwM2mId.SEC_SECURITY_MODE;
-import static org.eclipse.leshan.LwM2mId.SEC_SERVER_ID;
-import static org.eclipse.leshan.LwM2mId.SEC_SERVER_PUBKEY;
-import static org.eclipse.leshan.LwM2mId.SEC_SERVER_URI;
+import static org.eclipse.leshan.LwM2mId.*;
+
+import java.util.Arrays;
+import java.util.List;
 
 import org.eclipse.leshan.SecurityMode;
 import org.eclipse.leshan.client.resource.BaseInstanceEnabler;
 import org.eclipse.leshan.client.resource.LwM2mInstanceEnabler;
+import org.eclipse.leshan.core.model.ObjectModel;
 import org.eclipse.leshan.core.model.ResourceModel.Type;
 import org.eclipse.leshan.core.node.LwM2mResource;
 import org.eclipse.leshan.core.response.ExecuteResponse;
@@ -41,6 +39,9 @@ public class Security extends BaseInstanceEnabler {
 
     private static final Logger LOG = LoggerFactory.getLogger(Security.class);
 
+    private final static List<Integer> supportedResources = Arrays.asList(SEC_SERVER_URI, SEC_BOOTSTRAP,
+            SEC_SECURITY_MODE, SEC_PUBKEY_IDENTITY, SEC_SERVER_PUBKEY, SEC_SECRET_KEY, SEC_SERVER_ID);
+
     private String serverUri; /* coaps://host:port */
     private boolean bootstrapServer;
     // private SecurityMode securityMode;
@@ -50,6 +51,10 @@ public class Security extends BaseInstanceEnabler {
     private byte[] secretKey;
 
     private Integer shortServerId;
+
+    public Security() {
+        // should only be used at bootstrap time
+    }
 
     public Security(String serverUri, boolean bootstrapServer, int securityMode, byte[] publicKeyOrIdentity,
             byte[] serverPublicKey, byte[] secretKey, Integer shortServerId) {
@@ -75,6 +80,15 @@ public class Security extends BaseInstanceEnabler {
     public static Security pskBootstrap(String serverUri, byte[] pskIdentity, byte[] privateKey) {
         return new Security(serverUri, true, SecurityMode.PSK.code, pskIdentity.clone(), new byte[0],
                 privateKey.clone(), 0);
+    }
+
+    /**
+     * Returns a new security instance (RPK) for a bootstrap server.
+     */
+    public static Security rpkBootstrap(String serverUri, byte[] clientPublicKey, byte[] clientPrivateKey,
+            byte[] serverPublicKey) {
+        return new Security(serverUri, true, SecurityMode.RPK.code, clientPublicKey.clone(), serverPublicKey.clone(),
+                clientPrivateKey.clone(), 0);
     }
 
     /**
@@ -141,7 +155,7 @@ public class Security extends BaseInstanceEnabler {
             if (value.getType() != Type.OPAQUE) {
                 return WriteResponse.badRequest("invalid type");
             }
-            secretKey = (byte[]) value.getValue();
+            serverPublicKey = (byte[]) value.getValue();
             return WriteResponse.success();
         case SEC_SECRET_KEY: // Secret Key
             if (value.getType() != Type.OPAQUE) {
@@ -198,4 +212,8 @@ public class Security extends BaseInstanceEnabler {
         return super.execute(resourceid, params);
     }
 
+    @Override
+    public List<Integer> getAvailableResourceIds(ObjectModel model) {
+        return supportedResources;
+    }
 }

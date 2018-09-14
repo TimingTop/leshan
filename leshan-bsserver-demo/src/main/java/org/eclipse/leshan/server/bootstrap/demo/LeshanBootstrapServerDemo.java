@@ -19,7 +19,25 @@
 package org.eclipse.leshan.server.bootstrap.demo;
 
 import java.io.File;
+import java.math.BigInteger;
 import java.net.BindException;
+import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.security.AlgorithmParameters;
+import java.security.KeyFactory;
+import java.security.NoSuchAlgorithmException;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.spec.ECGenParameterSpec;
+import java.security.spec.ECParameterSpec;
+import java.security.spec.ECPoint;
+import java.security.spec.ECPrivateKeySpec;
+import java.security.spec.ECPublicKeySpec;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.InvalidParameterSpecException;
+import java.security.spec.KeySpec;
 import java.util.List;
 
 import org.apache.commons.cli.CommandLine;
@@ -40,13 +58,18 @@ import org.eclipse.leshan.server.bootstrap.demo.servlet.ServerServlet;
 import org.eclipse.leshan.server.californium.LeshanBootstrapServerBuilder;
 import org.eclipse.leshan.server.californium.LeshanServerBuilder;
 import org.eclipse.leshan.server.californium.impl.LeshanBootstrapServer;
+import org.eclipse.leshan.util.Hex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class LeshanBootstrapServerDemo {
 
     static {
-        System.setProperty("logback.configurationFile", "logback-config.xml");
+        // Define a default logback.configurationFile
+        String property = System.getProperty("logback.configurationFile");
+        if (property == null) {
+            System.setProperty("logback.configurationFile", "logback-config.xml");
+        }
     }
 
     private static final Logger LOG = LoggerFactory.getLogger(LeshanBootstrapServerDemo.class);
@@ -64,6 +87,7 @@ public class LeshanBootstrapServerDemo {
         options.addOption("slh", "coapshost", true, "Set the secure local CoAP address.\nDefault: any local address.");
         options.addOption("slp", "coapsport", true,
                 String.format("Set the secure local CoAP port.\nDefault: %d.", LwM2m.DEFAULT_COAP_SECURE_PORT));
+        options.addOption("wh", "webhost", true, "Set the HTTP address for web server.\nDefault: any local address.");
         options.addOption("wp", "webport", true, "Set the HTTP port for web server.\nDefault: 8080.");
         options.addOption("m", "modelsfolder", true, "A folder which contains object models in OMA DDF(.xml) format.");
         options.addOption("cfg", "configfile", true,
@@ -114,7 +138,8 @@ public class LeshanBootstrapServerDemo {
             secureLocalPort = Integer.parseInt(secureLocalPortOption);
         }
 
-        // Get http port
+        // get http address
+        String webAddress = cl.getOptionValue("wh");
         String webPortOption = cl.getOptionValue("wp");
         int webPort = 8080;
         if (webPortOption != null) {
@@ -131,7 +156,7 @@ public class LeshanBootstrapServerDemo {
         }
 
         try {
-            createAndStartServer(webPort, localAddress, localPort, secureLocalAddress, secureLocalPort,
+            createAndStartServer(webAddress, webPort, localAddress, localPort, secureLocalAddress, secureLocalPort,
                     modelsFolderPath, configFilename);
         } catch (BindException e) {
             System.err.println(String
@@ -142,8 +167,9 @@ public class LeshanBootstrapServerDemo {
         }
     }
 
-    public static void createAndStartServer(int webPort, String localAddress, int localPort, String secureLocalAddress,
-            int secureLocalPort, String modelsFolderPath, String configFilename) throws Exception {
+    public static void createAndStartServer(String webAddress, int webPort, String localAddress, int localPort,
+            String secureLocalAddress, int secureLocalPort, String modelsFolderPath, String configFilename)
+            throws Exception {
         // Create Models
         List<ObjectModel> models = ObjectLoader.loadDefault();
         if (modelsFolderPath != null) {
@@ -158,6 +184,38 @@ public class LeshanBootstrapServerDemo {
         builder.setLocalAddress(localAddress, localPort);
         builder.setLocalSecureAddress(secureLocalAddress, secureLocalPort);
         builder.setModel(new LwM2mModel(models));
+
+        // Create RPK credentials;
+        PublicKey publicKey = null;
+        try {
+            // Get point values
+            byte[] publicX = Hex
+                    .decodeHex("fb136894878a9696d45fdb04506b9eb49ddcfba71e4e1b4ce23d5c3ac382d6b4".toCharArray());
+            byte[] publicY = Hex
+                    .decodeHex("3deed825e808f8ed6a9a74ff6bd24e3d34b1c0c5fc253422f7febadbdc9cb9e6".toCharArray());
+            byte[] privateS = Hex
+                    .decodeHex("35a8303e67a7e99d06552a0f8f6c8f1bf91a174396f4fad6211ae227e890da11".toCharArray());
+
+            // Get Elliptic Curve Parameter spec for secp256r1
+            AlgorithmParameters algoParameters = AlgorithmParameters.getInstance("EC");
+            algoParameters.init(new ECGenParameterSpec("secp256r1"));
+            ECParameterSpec parameterSpec = algoParameters.getParameterSpec(ECParameterSpec.class);
+
+            // Create key specs
+            KeySpec publicKeySpec = new ECPublicKeySpec(new ECPoint(new BigInteger(publicX), new BigInteger(publicY)),
+                    parameterSpec);
+            KeySpec privateKeySpec = new ECPrivateKeySpec(new BigInteger(privateS), parameterSpec);
+
+            // Get keys
+            publicKey = KeyFactory.getInstance("EC").generatePublic(publicKeySpec);
+            Files.write(Paths.get("server_pub.der"), publicKey.getEncoded(), StandardOpenOption.CREATE);
+            PrivateKey privateKey = KeyFactory.getInstance("EC").generatePrivate(privateKeySpec);
+            builder.setPublicKey(publicKey);
+            builder.setPrivateKey(privateKey);
+        } catch (InvalidKeySpecException | NoSuchAlgorithmException | InvalidParameterSpecException e) {
+            LOG.error("Unable to initialize RPK.", e);
+            System.exit(-1);
+        }
 
         // Create CoAP Config
         NetworkConfig coapConfig;
@@ -175,7 +233,13 @@ public class LeshanBootstrapServerDemo {
         bsServer.start();
 
         // Now prepare and start jetty
-        Server server = new Server(webPort);
+        InetSocketAddress jettyAddr;
+        if (webAddress == null) {
+            jettyAddr = new InetSocketAddress(webPort);
+        } else {
+            jettyAddr = new InetSocketAddress(webAddress, webPort);
+        }
+        Server server = new Server(jettyAddr);
         WebAppContext root = new WebAppContext();
 
         root.setContextPath("/");
@@ -185,7 +249,7 @@ public class LeshanBootstrapServerDemo {
         ServletHolder bsServletHolder = new ServletHolder(new BootstrapServlet(bsStore));
         root.addServlet(bsServletHolder, "/api/bootstrap/*");
 
-        ServletHolder serverServletHolder = new ServletHolder(new ServerServlet(bsServer));
+        ServletHolder serverServletHolder = new ServletHolder(new ServerServlet(bsServer, publicKey));
         root.addServlet(serverServletHolder, "/api/server/*");
 
         server.setHandler(root);

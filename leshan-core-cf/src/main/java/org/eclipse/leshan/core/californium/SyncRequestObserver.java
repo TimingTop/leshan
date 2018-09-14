@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2016 Sierra Wireless and others.
+ * Copyright (c) 2018 Sierra Wireless and others.
  * 
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
@@ -12,93 +12,27 @@
  * 
  * Contributors:
  *     Sierra Wireless - initial API and implementation
- *     Achim Kraus (Bosch Software Innovations GmbH) - set exception in onSendError
- *     Simon Bernard                                 - use specific exception for onSendError  
  *******************************************************************************/
 package org.eclipse.leshan.core.californium;
 
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-
 import org.eclipse.californium.core.coap.Request;
 import org.eclipse.californium.core.coap.Response;
-import org.eclipse.leshan.core.request.exception.RequestRejectedException;
-import org.eclipse.leshan.core.request.exception.SendFailedException;
 import org.eclipse.leshan.core.response.LwM2mResponse;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-public abstract class SyncRequestObserver<T extends LwM2mResponse> extends AbstractRequestObserver<T> {
-
-    private static final Logger LOG = LoggerFactory.getLogger(SyncRequestObserver.class);
-
-    private CountDownLatch latch = new CountDownLatch(1);
-    private AtomicReference<T> ref = new AtomicReference<>(null);
-    private AtomicBoolean coapTimeout = new AtomicBoolean(false);
-    private AtomicReference<RuntimeException> exception = new AtomicReference<>();
-    private long timeout;
+public abstract class SyncRequestObserver<T extends LwM2mResponse> extends CoapSyncRequestObserver {
 
     public SyncRequestObserver(Request coapRequest, long timeout) {
-        super(coapRequest);
-        this.timeout = timeout;
-    }
-
-    @Override
-    public void onResponse(Response coapResponse) {
-        LOG.debug("Received coap response: {}", coapResponse);
-        try {
-            T lwM2mResponseT = buildResponse(coapResponse);
-            if (lwM2mResponseT != null) {
-                ref.set(lwM2mResponseT);
-            }
-        } catch (RuntimeException e) {
-            exception.set(e);
-        } finally {
-            latch.countDown();
-        }
-    }
-
-    @Override
-    public void onTimeout() {
-        coapTimeout.set(true);
-        latch.countDown();
-    }
-
-    @Override
-    public void onCancel() {
-        LOG.debug(String.format("Synchronous request cancelled %s", coapRequest));
-        latch.countDown();
-    }
-
-    @Override
-    public void onReject() {
-        exception.set(new RequestRejectedException("Request %s rejected", coapRequest.getURI()));
-        latch.countDown();
-    }
-
-    @Override
-    public void onSendError(Throwable error) {
-        exception.set(new SendFailedException(error, "Request %s cannot be sent", coapRequest, error.getMessage()));
-        latch.countDown();
+        super(coapRequest, timeout);
     }
 
     public T waitForResponse() throws InterruptedException {
-        try {
-            boolean timeElapsed = false;
-            timeElapsed = !latch.await(timeout, TimeUnit.MILLISECONDS);
-            if (timeElapsed || coapTimeout.get()) {
-                coapRequest.cancel();
-            }
-        } finally {
-            coapRequest.removeMessageObserver(this);
+        Response coapResponse = waitForCoapResponse();
+        if (coapResponse != null) {
+            return buildResponse(coapResponse);
+        } else {
+            return null;
         }
-
-        if (exception.get() != null) {
-            coapRequest.cancel();
-            throw exception.get();
-        }
-        return ref.get();
     }
+
+    protected abstract T buildResponse(Response coapResponse);
 }

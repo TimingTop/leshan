@@ -30,6 +30,7 @@ import org.eclipse.californium.elements.AddressEndpointContext;
 import org.eclipse.californium.elements.EndpointContext;
 import org.eclipse.californium.elements.EndpointMismatchException;
 import org.eclipse.californium.elements.RawData;
+import org.eclipse.californium.elements.auth.PreSharedKeyIdentity;
 import org.eclipse.californium.elements.util.SimpleMessageCallback;
 import org.eclipse.californium.scandium.DTLSConnector;
 import org.eclipse.leshan.core.request.ReadRequest;
@@ -78,7 +79,7 @@ public class SecurityTest {
 
         // Start it and wait for registration
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
 
         // Check client is well registered
         helper.assertClientRegisterered();
@@ -103,7 +104,7 @@ public class SecurityTest {
 
         // Start it and wait for registration
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
 
         // Check client is well registered
         helper.assertClientRegisterered();
@@ -111,29 +112,26 @@ public class SecurityTest {
         // Ensure we can send a read request
         helper.server.send(helper.getCurrentRegistration(), new ReadRequest(3, 0, 1));
 
-        // Pause the client
-        // helper.client.stop(false);
-
         // Add new credential to the server
         helper.getSecurityStore().add(SecurityInfo.newPreSharedKeyInfo(GOOD_ENDPOINT, "anotherPSK", GOOD_PSK_KEY));
 
+        // Create new session with new credentials at client side.
         // Get connector
-        Endpoint endpoint = helper.client.getCoapServer().getEndpoint(helper.client.getSecuredAddress());
+        Endpoint endpoint = helper.client.getCoapServer().getEndpoint(helper.client.getAddress());
         DTLSConnector connector = (DTLSConnector) ((CoapEndpoint) endpoint).getConnector();
         // Clear DTLS session to force new handshake
         connector.clearConnectionState();
-        // Change PSK idea
-        helper.setNewPsk(helper.client, "anotherPSK");
+        // Change PSK id
+        helper.setNewPsk("anotherPSK", GOOD_PSK_KEY);
         // restart connector
         connector.start();
         // send and empty message to force a new handshake with new credentials
         SimpleMessageCallback callback = new SimpleMessageCallback();
         connector.send(RawData.outbound(new byte[0], new AddressEndpointContext(helper.server.getSecuredAddress()),
                 callback, false));
-
         // Wait until new handshake DTLS is done
         EndpointContext endpointContext = callback.getEndpointContext(1000);
-        assertEquals(endpointContext.getPeerIdentity().getName(), "anotherPSK");
+        assertEquals(((PreSharedKeyIdentity) endpointContext.getPeerIdentity()).getIdentity(), "anotherPSK");
 
         // Try to send a read request this should failed with an SendFailedException.
         try {
@@ -168,24 +166,23 @@ public class SecurityTest {
 
         // Start it and wait for registration
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
 
         // Check client is well registered
         helper.assertClientRegisterered();
 
         // Check for update
-        helper.waitForUpdate(LIFETIME);
+        helper.waitForUpdateAtClientSide(LIFETIME);
         helper.assertClientRegisterered();
 
         // Check de-registration
         helper.client.stop(true);
-        helper.waitForDeregistration(1);
+        helper.waitForDeregistrationAtServerSide(1);
         helper.assertClientNotRegisterered();
 
         // check new registration
-        helper.resetLatch();
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
         helper.assertClientRegisterered();
     }
 
@@ -205,12 +202,12 @@ public class SecurityTest {
         // Check for registration
         helper.assertClientNotRegisterered();
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
         Registration registration = helper.getCurrentRegistration();
         helper.assertClientRegisterered();
 
         // Check for update
-        helper.waitForUpdate(LIFETIME);
+        helper.waitForUpdateAtClientSide(LIFETIME);
         helper.assertClientRegisterered();
 
         // Check stop do not de-register
@@ -219,9 +216,8 @@ public class SecurityTest {
         helper.assertClientRegisterered();
 
         // Check new registration
-        helper.resetLatch();
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
         helper.assertClientRegisterered();
         Registration newRegistration = helper.getCurrentRegistration();
         assertNotEquals(registration.getId(), newRegistration.getId());
@@ -317,8 +313,6 @@ public class SecurityTest {
         }
     }
 
-    @Ignore
-    // TODO implement RPK support for client
     @Test
     public void registered_device_with_rpk_to_server_with_rpk() throws NonUniqueSecurityInfoException {
         helper.createServerWithRPK();
@@ -331,13 +325,11 @@ public class SecurityTest {
 
         helper.assertClientNotRegisterered();
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
 
         assertNotNull(helper.getCurrentRegistration());
     }
 
-    @Ignore
-    // TODO implement RPK support for client
     @Test
     public void registered_device_with_bad_rpk_to_server_with_rpk() throws NonUniqueSecurityInfoException {
         helper.createServerWithRPK();
@@ -354,8 +346,6 @@ public class SecurityTest {
         helper.ensureNoRegistration(1);
     }
 
-    @Ignore
-    // TODO implement RPK support for client
     @Test
     public void registered_device_with_rpk_and_bad_endpoint_to_server_with_rpk() throws NonUniqueSecurityInfoException {
         helper.createServerWithRPK();
@@ -382,7 +372,7 @@ public class SecurityTest {
 
         helper.assertClientNotRegisterered();
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
 
         assertNotNull(helper.getCurrentRegistration());
     }
@@ -467,26 +457,25 @@ public class SecurityTest {
                 helper.clientX509CertChain[0].getPublicKey()));
 
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
 
         assertNotNull(helper.getCurrentRegistration());
     }
 
-    @Ignore
-    // TODO implement RPK support for client
     @Test
     public void registered_device_with_rpk_to_server_with_x509cert() throws NonUniqueSecurityInfoException {
         helper.createServerWithX509Cert(helper.trustedCertificates);
         helper.server.start();
 
-        helper.createRPKClient();
+        boolean useServerCertifcatePublicKey = true;
+        helper.createRPKClient(useServerCertifcatePublicKey);
         helper.client.start();
 
         helper.getSecurityStore()
                 .add(SecurityInfo.newRawPublicKeyInfo(helper.getCurrentEndpoint(), helper.clientPublicKey));
 
         helper.client.start();
-        helper.waitForRegistration(1);
+        helper.waitForRegistrationAtServerSide(1);
 
         assertNotNull(helper.getCurrentRegistration());
     }
